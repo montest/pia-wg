@@ -1,0 +1,14 @@
+[project]
+name = "pia-wg"
+version = "0.1.0"
+description = "A WireGuard configuration utility for Private Internet Access"
+requires-python = ">=3.10"
+dependencies = [
+    "pick>=2.4.0",
+    "requests>=2.32.0",
+    "requests-toolbelt>=1.0.0",
+    "urllib3>=2.2.0",
+]
+
+[tool.uv]
+package = false
