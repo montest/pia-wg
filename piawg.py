@@ -1,6 +1,8 @@
+import os
 import requests
 import json
 from requests_toolbelt.adapters import host_header_ssl
+import ssl
 import urllib3
 import subprocess
 import urllib.parse
@@ -8,6 +10,28 @@ import urllib.parse
 # PIA uses the CN attribute for certificates they issue themselves.
 # This will be deprecated by urllib3 at some point in the future, and generates a warning (that we ignore).
 urllib3.disable_warnings(urllib3.exceptions.SubjectAltNameWarning)
+
+_CA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ca.rsa.4096.crt')
+
+
+class _PIAAdapter(host_header_ssl.HostHeaderSSLAdapter):
+    # Python 3.13+ rejects PIA's CA unless VERIFY_X509_STRICT is cleared.
+    # Chain and hostname checks stay on.
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if hasattr(ssl, 'VERIFY_X509_STRICT'):
+            ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        ctx.load_verify_locations(_CA_PATH)
+        ctx.check_hostname = False
+        pool_kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+
+def _pia_session():
+    session = requests.Session()
+    session.mount('https://', _PIAAdapter())
+    session.verify = _CA_PATH
+    return session
 
 
 class piawg:
@@ -31,20 +55,15 @@ class piawg:
         self.region = region_name
 
     def get_token(self, username, password):
-        # Get common name and IP address for metadata endpoint in region
-        meta_cn = self.server_list[self.region]['servers']['meta'][0]['cn']
-        meta_ip = self.server_list[self.region]['servers']['meta'][0]['ip']
-
-        # Some tricks to verify PIA certificate, even though we're sending requests to an IP and not a proper domain
-        # https://toolbelt.readthedocs.io/en/latest/adapters.html#requests_toolbelt.adapters.host_header_ssl.HostHeaderSSLAdapter
-        s = requests.Session()
-        s.mount('https://', host_header_ssl.HostHeaderSSLAdapter())
-        s.verify = 'ca.rsa.4096.crt'
-
-        r = s.get("https://{}/authv3/generateToken".format(meta_ip), headers={"Host": meta_cn},
-                  auth=(username, password))
-        data = r.json()
-        if r.status_code == 200 and data['status'] == 'OK':
+        # Regional meta servers now present an ExpressVPN certificate, which the
+        # bundled PIA CA cannot verify. PIA's current token API uses a public cert.
+        r = requests.post('https://www.privateinternetaccess.com/api/client/v2/token',
+                          data={'username': username, 'password': password})
+        try:
+            data = r.json()
+        except ValueError:
+            return False
+        if r.status_code == 200 and data.get('token'):
             self.token = data['token']
             return True
         else:
@@ -60,9 +79,9 @@ class piawg:
         cn = self.server_list[self.region]['servers']['wg'][0]['cn']
         ip = self.server_list[self.region]['servers']['wg'][0]['ip']
 
-        s = requests.Session()
-        s.mount('https://', host_header_ssl.HostHeaderSSLAdapter())
-        s.verify = 'ca.rsa.4096.crt'
+        # Verify PIA's certificate even though the request goes to an IP.
+        # https://toolbelt.readthedocs.io/en/latest/adapters.html#requests_toolbelt.adapters.host_header_ssl.HostHeaderSSLAdapter
+        s = _pia_session()
 
         r = s.get("https://{}:1337/addKey?pt={}&pubkey={}".format(ip, urllib.parse.quote(self.token),
                                                                   urllib.parse.quote(self.publickey)), headers={"Host": cn})
